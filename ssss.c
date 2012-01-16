@@ -87,6 +87,7 @@ int opt_diffusion = 1;
 int opt_security = 0;
 int opt_threshold = -1;
 int opt_number = -1;
+int opt_shareindex = -1;
 char *opt_token = NULL;
 
 unsigned int degree;
@@ -457,7 +458,7 @@ void split(void)
     cprng_read(coeff[i]);
   }
   cprng_deinit();
-
+  
   mpz_init(x);
   mpz_init(y);
   for(i = 0; i < opt_number; i++) {
@@ -548,6 +549,86 @@ void combine(void)
   field_deinit();
 }
 
+void gen(void)
+{
+  mpz_t A[opt_threshold][opt_threshold], y[opt_threshold], x, h;
+  char buf[MAXLINELEN];
+  char *a, *b;
+  int i, j;
+  unsigned s = 0;
+  unsigned int fmt_len;
+  
+  for(fmt_len = 1,i = opt_number+opt_shareindex-1; i >= 10; i /= 10, fmt_len++);
+  
+  mpz_init(x);
+  if (! opt_quiet)
+    fprintf(stderr, "Enter %d shares separated by newlines:\n", opt_threshold);
+  for (i = 0; i < opt_threshold; i++) {
+    if (! opt_quiet)
+      fprintf(stderr, "Share [%d/%d]: ", i + 1, opt_threshold);
+
+    if (! fgets(buf, sizeof(buf), stdin))
+      fatal("I/O error while reading shares");
+    buf[strcspn(buf, "\r\n")] = '\0';
+    if (! (a = strchr(buf, '-')))
+      fatal("invalid syntax");
+    *a++ = 0;
+    if ((b = strchr(a, '-')))
+      *b++ = 0;
+    else
+      b = a, a = buf;
+
+    if (! s) {
+      s = 4 * strlen(b);
+      if (! field_size_valid(s))
+        fatal("share has illegal length");
+      field_init(s);
+    } else if (s != 4 * strlen(b))
+      fatal("shares have different security levels");
+
+    if (! (j = atoi(a)))
+      fatal("invalid share");
+    mpz_set_ui(x, j);
+    mpz_init_set_ui(A[opt_threshold - 1][i], 1);
+    for(j = opt_threshold - 2; j >= 0; j--) {
+      mpz_init(A[j][i]);
+      field_mult(A[j][i], A[j + 1][i], x);
+    }
+    mpz_init(y[i]);
+    field_import(y[i], b, 1);
+    field_mult(x, x, A[0][i]);
+    field_add(y[i], y[i], x);
+  }
+  mpz_clear(x);
+  if (restore_secret(opt_threshold, A, y))
+    fatal("shares inconsistent. Perhaps a single share was used twice");
+  
+  mpz_init(h);
+  for(i = 0;i < opt_threshold/2; i++)
+      MPZ_SWAP(y[i], y[opt_threshold - i - 1]);
+  mpz_clear(h);
+
+  mpz_init(x);
+  mpz_init(h);
+  for(i = opt_shareindex; i < opt_shareindex+opt_number; i++) {
+      mpz_set_ui(x, i);
+      horner(opt_threshold, h, x, (const mpz_t*)y);
+      if (opt_token)
+        fprintf(stdout, "%s-", opt_token);
+      fprintf(stdout, "%0*d-", fmt_len, i);
+      field_print(stdout, h, 1);
+  }
+  mpz_clear(h);
+  mpz_clear(x);
+
+  for (i = 0; i < opt_threshold; i++) {
+    for (j = 0; j < opt_threshold; j++)
+      mpz_clear(A[i][j]);
+    mpz_clear(y[i]);
+  }
+  field_deinit();
+}
+
 int main(int argc, char *argv[])
 {
   char *name;
@@ -583,9 +664,9 @@ int main(int argc, char *argv[])
   opt_help = argc == 1;
   const char* flags =
 #if ! NOMLOCK
-    "MvDhqQxs:t:n:w:";
+    "MvDhqQxs:t:n:w:i:";
 #else
-    "vDhqQxs:t:n:w:";
+    "vDhqQxs:t:n:w:i:";
 #endif
 
   while((i = getopt(argc, argv, flags)) != -1)
@@ -600,6 +681,7 @@ int main(int argc, char *argv[])
     case 'n': opt_number = atoi(optarg); break;
     case 'w': opt_token = optarg; break;
     case 'D': opt_diffusion = 0; break;
+    case 'i': opt_shareindex = atoi(optarg); break;
 #if ! NOMLOCK
     case 'M':
       if(failedMemoryLock != 0)
@@ -623,7 +705,7 @@ int main(int argc, char *argv[])
 #if ! NOMLOCK
             " [-M]"
 #endif
-            " [-x] [-q] [-Q] [-D] [-v]",
+            " [-x] [-q] [-Q] [-D] [-v]\n",
             stderr);
       if (opt_showversion)
         fputs("\nVersion: " VERSION, stderr);
@@ -644,6 +726,32 @@ int main(int argc, char *argv[])
 
     split();
   }
+  else if (strstr(name, "gen")) {
+      if (opt_help || opt_showversion) {
+        fputs("Generate new secret shares for Shamir's Secret Sharing Scheme.\n"
+              "\n"
+              "ssss-gen -t threshold -i index [-n shares]"
+  #if ! NOMLOCK
+              " [-M]"
+  #endif
+              " [-x] [-q] [-Q] [-v]\n",
+              stderr);
+        if (opt_showversion)
+          fputs("\nVersion: " VERSION, stderr);
+        exit(0);
+      }
+
+      if (opt_threshold < 2)
+        fatal("invalid parameters: invalid threshold value");
+      
+      if(opt_shareindex < 1)
+        fatal("invalid parameters: share index must be greater than zero");
+        
+      if(opt_number <= 0)
+        opt_number = 1;
+
+      gen();
+  }
   else {
     if (opt_help || opt_showversion) {
       fputs("Combine shares using Shamir's Secret Sharing Scheme.\n"
@@ -652,7 +760,7 @@ int main(int argc, char *argv[])
 #if ! NOMLOCK
             " [-M]"
 #endif
-            " [-x] [-q] [-Q] [-D] [-v]",
+            " [-x] [-q] [-Q] [-D] [-v]\n",
             stderr);
       if (opt_showversion)
         fputs("\nVersion: " VERSION, stderr);
